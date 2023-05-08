@@ -8,15 +8,13 @@ require(magrittr)
 #-----------------------------------------------------------------------------------------------------------------------
 extract_prefix <- function(name, sex) {
   purrr::map2_chr(name, sex, ~{
-    #prefix <- stringr::str_extract_all(., "(Mme)|(Mlle. )|([mM]iss)|([Mm]rs)|([Mm]r)|([Mm]aster)|(Dr)|(Rev)|(Col)|(Major)|(Capt. )|(Don. )|(Sir)|(Lady)|(Countess. )|(Jonkheer. )")
-
+  
     # if Nob or prof, rare
     prof <- stringr::str_detect(.x, "(Dr)|(Rev)|(Col)|(Major)|(Capt. )")
     nob <- stringr::str_detect(.x, "(Don. )|(Dona.)|(Sir)|(Lady)|(Countess. )|(Jonkheer. )")
     if(nob | prof) { return("rare") }
     
     # if married female, Mrs 
-    # (inc professional females - these are likely to be assuming their husbands title because sexism and all that, right?)
     if(stringr::str_detect(.x, "(Mlle. )|([Mm]rs)") | (prof & .y == 1) | (stringr::str_detect(.x, "Mr") & .y == 1)) {return("Mrs")}
     
     # If professional, Prof
@@ -24,16 +22,10 @@ extract_prefix <- function(name, sex) {
       
     # if unmarried female, Miss
     if(stringr::str_detect(.x, "(Mme)|([mM]iss)|([Mm]s)")) {return("Miss")}
-    
     if(stringr::str_detect(.x, "Mr")) {return("Mr")}
     if(stringr::str_detect(.x, "Master")) {return("Master")}
-    #if(stringr::str_detect(.x, "[Mm]s")) {return("Ms")}
   })
 }
-
-#extract_prefix(titanic$name, titanic$sex)
-# Mr, Mrs, Miss, Master, Prof, Nob
-
 
 set_bins <- function(var, k) {
   var <- tibble::tibble(
@@ -82,6 +74,7 @@ titanic <- dplyr::bind_rows(titanic_train, titanic_test) %>%
     age = Age,
     sib_sp = as.integer( SibSp ),
     parch = as.integer( Parch ),
+    family_size = sib_sp + parch + 1,
     fare = Fare,
     deck = stringr::str_extract(Cabin, "^[a-zA-Z](?=[0-9]+)"),
     cabin_number = purrr::map_chr(Cabin, ~{stringr::str_extract_all(., "[0-9]+",)[[1]] %>% stringr::str_c(collapse = ", ")}),
@@ -95,39 +88,27 @@ titanic <- dplyr::bind_rows(titanic_train, titanic_test) %>%
 #  fill missing values
 #-----------------------------------------------------------------------------------------------------------------------
 
-# Age: ----------------------------------------------------------------------
-# age might be important but there are 86 NAs in age for the test data 
+# fill age with random variable based on...
+# - class
+# - prefix
+titanic %>%
+  ggplot2::ggplot( ggplot2::aes(age) ) +
+  ggplot2::geom_histogram() +
+  ggplot2::facet_wrap(~class + prefix, nrow = 3)
 
-# observations: ---------------------------------------------------------------
-# - class has some relationship to age (the rich are older) but fare does not.
-# - sib_sp and parch (i.e. family size) are both negatively related to age.
-# - lower decks with lower classes appear to be younger but lots of missing data (maybe means no cabin assigned?)
-# - there are no NAs in class sib_sp or parch
+titanic <- titanic %>%
+  dplyr::group_by(class, prefix) %>%
+  dplyr::mutate(
+    age = ifelse( is.na(age),
+                  rnorm(1, mean(age, na.rm = T), sd(age, na.rm = T)) %>% pmax(.,1),
+                  age
+                  )
+  ) %>%
+  dplyr::ungroup()
 
-# solution: ------------------------------------------------------------------
-# - for the test data set estimate missing ages from class, sib_sp and parch
-# - for the training data remove missing rows (?)
 
-# Fare: ---------------------------------------------------------------------
-# - fare might be important but there there is a single missing fare value in test
-
-# observations: ---------------------------------------------------------------
-# - the missing value is class 3, no family group, 60.5yrs old and unknown deck
-# - there is a strong relationship between class and fare, especially for upper class
-# - higher fairs for more central decks (but widely dispersed unknowns)
-# - some relationship between sib_sp and parch, especially for lowest class
-# - some relationship between embarkation port and fare, S is most expensive in lower class
-# - little relationship between age or sex and fare
-
-# solution: -------------------------------------------------------------------
-# - Estimate the missing fare from sib_sp, parch and embarkation port
-# - ignore class 2 and 3 in the estimation
-
-# embarked: (port) -------------------------------------------------------------------
-# just one missing, fill with "S" the most common
-
+# fill single missing fare based on lm against family size and class
 fare_mod <- lm(fare ~ sib_sp + parch, data = titanic, subset = class == 3)
-age_mod <- lm(age ~ factor(class) + sib_sp + parch, data = titanic) 
 
 titanic <- titanic %>%
   dplyr::mutate(
@@ -146,268 +127,170 @@ titanic <- titanic %>%
 # feature engineering - class
 #-----------------------------------------------------------------------------------------------------------------------
 titanic %>%
-  dplyr::group_by(class) %>%
-  dplyr::summarise(n = sum(survived == 1, na.rm = T)/dplyr::n()) %>%
-  ggplot2::ggplot( ggplot2::aes(class, n) ) +
-  ggplot2::geom_col()
+  dplyr::mutate(group = class) %>%
+  dplyr::group_by(group) %>%
+  dplyr::summarise(
+    n_total = dplyr::n(),
+    
+    n_test = sum(is.na(survived)),
+    n_train = sum(!is.na(survived)),
+    
+    prop = sum(survived, na.rm = T) / n_train
+  ) %>%
+  dplyr::mutate(
+    p_test = round(n_test/ sum(n_test)*100, 2),
+    p_train = round(n_train / sum(n_train)*100, 2),
+  ) %>%
+  ggplot2::ggplot( ggplot2::aes(group, prop) ) +
+  ggplot2::geom_col() +
+  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = stringr::str_c("test: ",p_test, "%")) ) +
+  ggplot2::geom_label( ggplot2::aes(y = 0.8, label = stringr::str_c("train: ",p_train, "%")) )
 
 # definately a keeper
 # - leave as it is 
 
 #-----------------------------------------------------------------------------------------------------------------------
-# feature engineering - sex (& class)
-#-----------------------------------------------------------------------------------------------------------------------
-titanic %>%
-  dplyr::group_by(sex, class) %>%
-  dplyr::summarise(prop = sum(survived, na.rm = T) / dplyr::n()) %>%
-  ggplot2::ggplot( ggplot2::aes(stringr::str_c(sex, "_", class), prop) ) +
-  ggplot2::geom_col()
-
-# keeper
-# a sex - class variable might be useful?
-
-titanic <- titanic %>% dplyr::mutate(
-  sex_class = stringr::str_c(sex, class),
-  sex_class = purrr::map_int(sex_class, ~{which(. == unique(sex_class)) %>% as.integer()})-1
-)
-
-#-----------------------------------------------------------------------------------------------------------------------
-# feature engineering - prefix
-#-----------------------------------------------------------------------------------------------------------------------
-
-titanic %>%
-  dplyr::group_by(prefix) %>%
-  dplyr::summarise(prop = sum(survived, na.rm = T) / dplyr::n()) %>%
-  ggplot2::ggplot( ggplot2::aes(prefix, prop) ) +
-  ggplot2::geom_col()
-
-# super useful 
-# - leave as it is
-
-#-----------------------------------------------------------------------------------------------------------------------
-# feature engineering - sib_sp / parch / family size
-#-----------------------------------------------------------------------------------------------------------------------
-
-titanic %>%
-  dplyr::mutate(family_size = sib_sp + parch + 1) %>%
-  dplyr::group_by(sib_sp) %>%
-  dplyr::summarise(prop = sum(survived, na.rm = T) / dplyr::n()) %>%
-  ggplot2::ggplot( ggplot2::aes(sib_sp, prop) ) +
-  ggplot2::geom_col() +
-  ggplot2::scale_x_continuous(breaks = seq(0, 10, 1))
-
-titanic %>%
-  dplyr::mutate(family_size = sib_sp + parch + 1) %>%
-  dplyr::group_by(parch) %>%
-  dplyr::summarise(prop = sum(survived, na.rm = T) / dplyr::n()) %>%
-  ggplot2::ggplot( ggplot2::aes(parch, prop) ) +
-  ggplot2::geom_col() +
-  ggplot2::scale_x_continuous(breaks = seq(0, 10, 1))
-
-titanic %>%
-  dplyr::mutate(family_size = sib_sp + parch + 1) %>%
-  dplyr::group_by(family_size) %>%
-  dplyr::summarise(
-    n = sum(!is.na(survived)),
-    prop = sum(survived, na.rm = T) / sum(!is.na(survived))
-    ) %>%
-  ggplot2::ggplot( ggplot2::aes(family_size, prop, alpha = n) ) +
-  ggplot2::geom_col() +
-  ggplot2::scale_x_continuous(breaks = seq(0, 10, 1))
-
-# family size may be more useful than sib_sp and parch
-# - add family size and remove the others
-
-titanic <- titanic %>%
-  dplyr::mutate(family_size = sib_sp + parch + 1) %>%
-  dplyr::select(-c(sib_sp, parch))
-  
-  
-
-#-----------------------------------------------------------------------------------------------------------------------
-# feature engineering - surname
-#-----------------------------------------------------------------------------------------------------------------------
-
-family_smry <- titanic %>%
-  dplyr::group_by(surname, family_size) %>%
-  dplyr::summarise(
-    n = dplyr::n(),
-    ticket_groups = unique(ticket_number) %>% length(),
-    tickets = stringr::str_c(ticket_number, collapse = ", ")
-  ) %>%
-  dplyr::mutate(family_known = family_size == n) %>%
-  dplyr::filter(family_known) %>%
-  dplyr::ungroup() %>%
-  dplyr::mutate(family_id = seq_along(surname)) %>%
-  dplyr::select(surname, family_size, family_id, n)
-
-sum(family_smry$n) / nrow(titanic) #  0.8036669
-
-# family can be identified for ~80\% of individuals. However it is not clear what other features could be extracted
-
-titanic <- titanic %>% dplyr::select(-name, -surname)
-
-#-----------------------------------------------------------------------------------------------------------------------
-# feature engineering - ticket number
-#-----------------------------------------------------------------------------------------------------------------------
-
-group_smry <- titanic %>%
-  dplyr::group_by(ticket_number) %>%
-  dplyr::summarise(
-    n = dplyr::n(),
-    #n_surname = unique(surname) %>% length(),
-    #surnames = stringr::str_c(surname, collapse = ", ")
-  ) %>%
-  dplyr::ungroup() %>%
-  dplyr::mutate( group_id = seq_along(ticket_number) ) %>%
-  dplyr::select(ticket_number, group_id, "group_size" = n)
-
-
-titanic %>%
-  dplyr::left_join(group_smry, by = c("ticket_number")) %>%
-  dplyr::group_by(group_size) %>%
-  dplyr::summarise(
-    n = sum(!is.na(survived)),
-    prop = sum(survived, na.rm = T) / sum(!is.na(survived))
-  )  %>%
-  ggplot2::ggplot( ggplot2::aes(group_size, prop, alpha = n) ) +
-  ggplot2::geom_col() +
-  ggplot2::scale_x_continuous(breaks = seq(0, 10, 1))
-
-# group size looks similar to family size but it might be useful for mixed groups
-
-titanic <- titanic %>%
-  dplyr::left_join(group_smry, by = c("ticket_number")) %>%
-  dplyr::select(-ticket, -ticket_number, -ticket_extra, -group_id)
-
-
-#-----------------------------------------------------------------------------------------------------------------------
 # feature engineering - age
 #-----------------------------------------------------------------------------------------------------------------------
-
-
 titanic %>%
-  dplyr::mutate(age = set_bins(age, 4)) %>%
+  dplyr::group_by(class) %>%
   dplyr::mutate(
-    #group = age,
-    group = stringr::str_c("c", class, ", a", age)
-    #group = stringr::str_c("s", sex, ", a", age),
-    #group = stringr::str_c( ", a", age,"p", prefix)
-    ) %>%
-  dplyr::group_by(group) %>%
+    age = set_bins(age, 3),
+    group = as.character( age )
+  ) %>%
+  dplyr::group_by(group) %>% # group, class
   dplyr::summarise(
-    n = sum(!is.na(survived)),
-    prop = sum(survived, na.rm = T) / n
+    n_total = dplyr::n(),
+    
+    n_test = sum(is.na(survived)),
+    n_train = sum(!is.na(survived)),
+    
+    prop = sum(survived, na.rm = T) / n_train
+  ) %>%
+  dplyr::mutate(
+    p_test = round(n_test/ sum(n_test)*100, 2),
+    p_train = round(n_train / sum(n_train)*100, 2),
   ) %>%
   ggplot2::ggplot( ggplot2::aes(group, prop) ) +
   ggplot2::geom_col() +
-  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = n) )
+  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = stringr::str_c("test: ",p_test, "%")) ) +
+  ggplot2::geom_label( ggplot2::aes(y = 0.8, label = stringr::str_c("train: ",p_train, "%")) ) #+
+  #ggplot2::facet_wrap(~class, nrow = 3)
 
-# age isn't much good by itself, but..
-# - combined with class its much better
-# - combined with sex its kinda okay but not awesome
-# - combined with prefix its also sorta fine but not ideal
+titanic %>%
+  dplyr::mutate(
+    age = set_bins(age, 3),
+    group = as.character( age )
+  ) %>%
+  dplyr::group_by(group) %>%
+  dplyr::summarise(
+    n_total = dplyr::n(),
+    
+    n_test = sum(is.na(survived)),
+    n_train = sum(!is.na(survived)),
+    
+    prop = sum(survived, na.rm = T) / n_train
+  ) %>%
+  dplyr::mutate(
+    p_test = round(n_test/ sum(n_test)*100, 2),
+    p_train = round(n_train / sum(n_train)*100, 2),
+  ) %>%
+  ggplot2::ggplot( ggplot2::aes(group, prop) ) +
+  ggplot2::geom_col() +
+  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = stringr::str_c("test: ",p_test, "%")) ) +
+  ggplot2::geom_label( ggplot2::aes(y = 0.8, label = stringr::str_c("train: ",p_train, "%")) )
+
+# age might be noisy, but..
+# - it might be better subset by class
+# - it might depend heavily on the age guessing
 
 
 titanic <- titanic %>%
   dplyr::mutate(
-    age = set_bins(age, 4),
-    class_age = stringr::str_c(class, age),
-    class_age = purrr::map_int(class_age, ~{which(. == (unique(class_age)%>%sort())) %>% as.integer()})-1
-  )
-
-
+    age_var = age,
+    age = set_bins(age, 3)-1
+  ) %>%
+  dplyr::group_by(class) %>%
+  dplyr::mutate(
+    age_by_class = set_bins(age, 3)-1
+  ) %>%
+  dplyr::ungroup()
+  
 #-----------------------------------------------------------------------------------------------------------------------
 # feature engineering - fare
 #-----------------------------------------------------------------------------------------------------------------------
 
 titanic %>%
+  dplyr::left_join(by = "ticket_number", 
+                   y = titanic %>%
+                     dplyr::group_by(ticket_number) %>%
+                     dplyr::summarise(people_on_ticket = dplyr::n())
+  ) %>%
+  dplyr::group_by(class) %>%
   dplyr::mutate(
     fare = set_bins(fare, 4),
-    fare_group = set_bins(fare/group_size, 4),
-    fare_family = set_bins(fare/family_size, 4),
-    
-    #group = as.character( fare ),
-    #group = stringr::str_c("c", class, ", f", fare),
-    #group = stringr::str_c("f", fare, ", a", age ),
-    #group = stringr::str_c("f", fare, ", ", prefix),
-    
-    #group = as.character( fare_group ),
-    #group = stringr::str_c("c", class, ", f", fare_group),
-    #group = stringr::str_c("f", fare_group, ", a", age),
-    #group = stringr::str_c(prefix, ", f", fare_group),
-    
-    group = as.character( fare_family ),
-    group = stringr::str_c("c", class, ", f", fare_family),
-    #group = stringr::str_c("f", fare, ", a", age),
-    #group = stringr::str_c(prefix, ", f", fare_family)
-
+    group = as.character( fare ),
   ) %>%
-  dplyr::group_by(group) %>%
+  dplyr::group_by(group, class) %>%
   dplyr::summarise(
-    n = sum(!is.na(survived)),
-    prop = sum(survived, na.rm = T) / n
+    n_total = dplyr::n(),
+    
+    n_test = sum(is.na(survived)),
+    n_train = sum(!is.na(survived)),
+    
+    prop = sum(survived, na.rm = T) / n_train
+  ) %>%
+  dplyr::mutate(
+    p_test = round(n_test/ sum(n_test)*100, 2),
+    p_train = round(n_train / sum(n_train)*100, 2),
   ) %>%
   ggplot2::ggplot( ggplot2::aes(group, prop) ) +
   ggplot2::geom_col() +
-  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = n) )
+  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = stringr::str_c("test: ",p_test, "%")) ) +
+  ggplot2::geom_label( ggplot2::aes(y = 0.8, label = stringr::str_c("train: ",p_train, "%")) ) +
+  ggplot2::facet_wrap(~class, nrow = 3)
 
-# fair looks good
-# - fair by age  group size is even, but doesn't add much beyond fare
-# - fair by class has very variable group size
-# - fair by prefix has variable group size
-
-# fair_group looks bad - no variation
-# - maybe slight intra-class vatiation, higher fairs lower survival ??
-# - age by fair group has no variation
-# - by prefix dosn't seem to add anything
-
-# fair by family - minimal variation probably nothing
-# - class may have a strong interaction with fare within class 2
-# - age doesn't add anything really
-# - mot sure about prefix
+# fare by class keeps the group size more even 
+# - but may cause differences between test and train 
 
 titanic <- titanic %>%
-  dplyr::mutate(
-    fare = set_bins(fare, 4) -1,
-    fare_family = set_bins(fare/family_size, 4),
-    class_fare_family = stringr::str_c(class, fare_family),
-    class_fare_family = purrr::map_int(class_fare_family, ~{which(. == (unique(class_fare_family) %>% sort())) %>% as.integer()})-1
-  ) %>%
-  dplyr::select(-fare_family)
-  
-#-----------------------------------------------------------------------------------------------------------------------
-# feature engineering - deck
-#-----------------------------------------------------------------------------------------------------------------------
+  dplyr::group_by(class) %>%
+  dplyr::mutate(fare_by_class = set_bins(fare, 4)) %>%
+  dplyr::select(-fare) %>%
+  dplyr::ungroup() 
 
+#-----------------------------------------------------------------------------------------------------------------------
+# feature engineering - sex 
+#-----------------------------------------------------------------------------------------------------------------------
 titanic %>%
   dplyr::mutate(
-    group = purrr::map_int(deck, ~{
-      if(is.na(.)) {return(0L)}
-      which(. == unique(deck[!is.na(deck)]))
-      }),
-    group = ifelse(is.na(deck), 0L, 1L)
+    group = as.character( sex ),
     ) %>%
-  dplyr::group_by(group) %>%
-  dplyr::summarise(
-    n = sum(!is.na(survived)),
-    prop = sum(survived, na.rm = T) / n
-  ) %>%
-  ggplot2::ggplot( ggplot2::aes(group, prop) ) +
-  ggplot2::geom_col() +
-  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = n) )
+    dplyr::group_by(group) %>%
+    dplyr::summarise(
+      n_total = dplyr::n(),
+      
+      n_test = sum(is.na(survived)),
+      n_train = sum(!is.na(survived)),
+      
+      prop = sum(survived, na.rm = T) / n_train
+    ) %>%
+    dplyr::mutate(
+      p_test = round(n_test/ sum(n_test)*100, 2),
+      p_train = round(n_train / sum(n_train)*100, 2),
+    ) %>%
+    ggplot2::ggplot( ggplot2::aes(group, prop) ) +
+    ggplot2::geom_col() +
+    ggplot2::geom_label( ggplot2::aes(y = 0.9, label = stringr::str_c("test: ",p_test, "%")) ) +
+    ggplot2::geom_label( ggplot2::aes(y = 0.8, label = stringr::str_c("train: ",p_train, "%")) ) 
 
-titanic$n_cabins %>% unique()
+# keeper
+# a sex - class variable might be useful?
 
-# deck doesn't seem to have much influence, and most are NA.
-# - if you had a cabin you are more likely to survive even if it's a bad one.
-# - lots of cabin numbers, not sure if there's anything useful there
-# - n_cabins is broken
-
-titanic <- titanic %>%
-  dplyr::mutate( cabin = ifelse(is.na(deck), 0L, 1L) ) %>%
-  dplyr::select(-deck, -cabin_number, -n_cabins)
-
+#titanic <- titanic %>% dplyr::mutate(
+#  sex_class = stringr::str_c(sex, class),
+#  sex_class = purrr::map_int(sex_class, ~{which(. == unique(sex_class)) %>% as.integer()})-1
+#)
 
 #-----------------------------------------------------------------------------------------------------------------------
 # feature engineering - prefix
@@ -417,97 +300,319 @@ titanic %>%
   dplyr::mutate(
     group = purrr::map_int(prefix, ~{which(. == unique(prefix))})
   ) %>%
+    dplyr::group_by(group) %>%
+    dplyr::summarise(
+      n_total = dplyr::n(),
+      
+      n_test = sum(is.na(survived)),
+      n_train = sum(!is.na(survived)),
+      
+      prop = sum(survived, na.rm = T) / n_train
+    ) %>%
+    dplyr::mutate(
+      p_test = round(n_test/ sum(n_test)*100, 2),
+      p_train = round(n_train / sum(n_train)*100, 2),
+    ) %>%
+    ggplot2::ggplot( ggplot2::aes(group, prop) ) +
+    ggplot2::geom_col() +
+    ggplot2::geom_label( ggplot2::aes(y = 0.9, label = stringr::str_c("test: ",p_test, "%")) ) +
+    ggplot2::geom_label( ggplot2::aes(y = 0.8, label = stringr::str_c("train: ",p_train, "%")) ) 
+
+# prefix is important
+titanic <- titanic %>%
+  dplyr::mutate(prefix = purrr::map_int(prefix, ~{which(. == unique(prefix))}))
+
+#-----------------------------------------------------------------------------------------------------------------------
+# feature engineering - sib_sp / parch / family size
+#-----------------------------------------------------------------------------------------------------------------------
+
+titanic %>%
+  dplyr::mutate(group = family_size) %>%
   dplyr::group_by(group) %>%
   dplyr::summarise(
-    n = sum(!is.na(survived)),
-    prop = sum(survived, na.rm = T) / n
+    n_total = dplyr::n(),
+    
+    n_test = sum(is.na(survived)),
+    n_train = sum(!is.na(survived)),
+    
+    prop = sum(survived, na.rm = T) / n_train
+  ) %>%
+  dplyr::mutate(
+    p_test = round(n_test/ sum(n_test)*100, 2),
+    p_train = round(n_train / sum(n_train)*100, 2),
   ) %>%
   ggplot2::ggplot( ggplot2::aes(group, prop) ) +
   ggplot2::geom_col() +
-  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = n) )
-
-# prefix is very important, should probably be one-hot encoded rather than ordinal
-
-titanic <- titanic %>%
-  dplyr::mutate(value = 1L) %>%
-  tidyr::spread(prefix, value, fill = 0L) %>%
-  dplyr::select(-rare)
-
+  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = stringr::str_c("test: ",p_test, "%")) ) +
+  ggplot2::geom_label( ggplot2::aes(y = 0.8, label = stringr::str_c("train: ",p_train, "%")) ) 
+  
 #-----------------------------------------------------------------------------------------------------------------------
 # feature engineering - port
 #-----------------------------------------------------------------------------------------------------------------------
+  
+  titanic %>%
+    dplyr::mutate(
+      group = purrr::map_int(port, ~{which(. == unique(port))}),
+      group = port
+    ) %>%
+    dplyr::group_by(group) %>%
+    dplyr::summarise(
+      n_total = dplyr::n(),
+      
+      n_test = sum(is.na(survived)),
+      n_train = sum(!is.na(survived)),
+      
+      prop = sum(survived, na.rm = T) / n_train
+    ) %>%
+    dplyr::mutate(
+      p_test = round(n_test/ sum(n_test)*100, 2),
+      p_train = round(n_train / sum(n_train)*100, 2),
+    ) %>%
+    ggplot2::ggplot( ggplot2::aes(group, prop) ) +
+    ggplot2::geom_col() +
+    ggplot2::geom_label( ggplot2::aes(y = 0.9, label = stringr::str_c("test: ",p_test, "%")) ) +
+    ggplot2::geom_label( ggplot2::aes(y = 0.8, label = stringr::str_c("train: ",p_train, "%")) ) 
+  
+  # probably important
+  titanic <- titanic %>%
+    dplyr::mutate( port = purrr::map_int(port, ~{which(. == unique(port))}) -1 )
+  
 
-titanic %>%
-  dplyr::mutate(
-    group = purrr::map_int(port, ~{which(. == unique(port))}),
-    group = port
-  ) %>%
-  dplyr::group_by(group) %>%
+#-----------------------------------------------------------------------------------------------------------------------
+# clear up unused variables:
+#-----------------------------------------------------------------------------------------------------------------------
+titanic <- titanic %>%
+  dplyr::select(-ticket, -ticket_extra, -deck, -cabin_number, -n_cabins)
+
+#-----------------------------------------------------------------------------------------------------------------------
+# check correlation and write out:
+#-----------------------------------------------------------------------------------------------------------------------
+Hmisc::rcorr(as.matrix( titanic[titanic$set == "train", !names(titanic) %in% c("PassengerId", "set", "name", "surname", "ticket_number")] ))
+# age_by_class is close to class - but the plots look okay i think 
+# fare_by_class maybe a okay though
+
+titanic %>% 
+  dplyr::select(PassengerId, survived, class, prefix, sex, age, sib_sp, parch, family_size, age_by_class, fare_by_class, set) %>%
+  readr::write_csv(., "titanic/titanic_clean.csv")
+
+#-----------------------------------------------------------------------------------------------------------------------
+# more feature engineering - identifying companions
+#-----------------------------------------------------------------------------------------------------------------------
+
+# if all same name & stated family size == n individuals then they belong to the same family group
+relations <- titanic %>%
+  dplyr::group_by(surname, family_size) %>%
   dplyr::summarise(
-    n = sum(!is.na(survived)),
-    prop = sum(survived, na.rm = T) / n
+    n = dplyr::n(),
+    tickets = list( unique(ticket_number) ),
+    ids = list(PassengerId)
+  ) %>%
+  dplyr::filter(family_size == n & n > 1) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(tickets, ids)
+
+# 32.00917% of individuals in a family (not inc. family of one)
+sum( lapply(X = relations$ids, FUN = length) %>% unlist() ) / nrow(titanic) * 100 
+
+
+# add known relations variable for each passenger
+titanic <- titanic %>%
+  dplyr::left_join(by = c("surname", "family_size"),
+                   y = titanic %>%
+                     dplyr::group_by(surname, family_size) %>%
+                     dplyr::summarise(n = dplyr::n()) %>%
+                     dplyr::mutate(known_relations = family_size == n & n > 1) %>%
+                     dplyr::select(-n)
+                   )
+
+  
+# if traveling on the same ticket, they belong to the same group
+group_smry <- titanic %>%
+  dplyr::group_by(ticket_number) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    n_surname = unique(surname) %>% length(),
+    surnames = stringr::str_c(surname, collapse = ", "),
+    known_relations_lst = list(known_relations),
+    known_relations = sum(known_relations),
+    equal = known_relations == n,
+    ids = list(PassengerId)
+  ) 
+
+# add non-family groups to relations
+relations <- group_smry %>%
+  dplyr::filter(known_relations == 0 & n > 1) %>%
+  dplyr::group_by(ticket_number) %>%
+  dplyr::mutate(tickets = list(ticket_number)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(tickets, ids) %>%
+  dplyr::bind_rows(relations)
+
+# now 45.37815% of people are in relations
+sum( lapply(X = relations$ids, FUN = length) %>% unlist() ) / nrow(titanic) * 100 
+
+# find people on the same ticket as people in relations and add them to their group
+to_add <- group_smry %>%
+  dplyr::filter(known_relations > 0 &!equal) %>%
+  dplyr::select(known_relations_lst, ids, ticket_number)
+
+ids <- purrr::map(1:nrow(to_add), ~{
+  ticket_number <- to_add$ticket_number[.]
+  tibble::tibble(
+    ids = to_add$ids[[.]][!to_add$known_relations_lst[[.]]],
+    ticket_number = ticket_number 
+  )
+}) %>% 
+  dplyr::bind_rows()
+
+for(i in 1:nrow(ids)) {
+  id <- ids$ids[i]; ticket <- ids$ticket_number[i]; j <- 0
+  repeat{
+    j <- j+1
+    if(ticket %in% relations$tickets[[j]]) {
+      relations$ids[[j]] <- c(relations$ids[[j]], id)
+      print(stringr::str_c(id, " placed!"))
+      break
+    }
+    if(j == nrow(relations)) {
+      print(id, " not placed!")
+      break
+    }
+  }
+}
+
+# now 48.35752% of people are in relations
+sum( lapply(X = relations$ids, FUN = length) %>% unlist() ) / nrow(titanic) * 100
+
+# update known_relations:
+family_smry <- titanic %>%
+  dplyr::mutate(
+    known_relations = purrr::map_lgl(PassengerId, ~{
+      id <- .; i <- 0
+      repeat{
+        i <- i+1
+        if(id %in% relations$ids[[i]]) {
+          return(TRUE)
+        }
+        if(i == nrow(relations)) {return(FALSE)}
+      }
+    })
+  ) %>%
+  dplyr::filter(!known_relations) %>%
+  dplyr::group_by(surname, family_size) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    tickets = stringr::str_c(unique(ticket_number), collapse = ", ")
+  )
+
+# 1.604278% of people say they're in a group but can't be placed
+sum( family_smry$n[family_smry$family_size > 1] ) / nrow(titanic) * 100
+
+# 50.0382% of people are most likely traveling alone
+(1-(sum( family_smry$n[family_smry$family_size > 1] ) + sum( lapply(X = relations$ids, FUN = length) %>% unlist() ))  / nrow(titanic) ) *100
+
+# link every passenger to the people in their group
+titanic <- titanic %>%
+  dplyr::mutate(
+    companions = purrr::map(PassengerId, ~{
+      id <- .; i <- 0
+      repeat{
+        i <- i+1
+        if(id %in% relations$ids[[i]]) {
+          return(relations$ids[[i]])
+        }
+        if(i == nrow(relations)) {return(id)}
+      }
+    })
+  ) %>%
+  dplyr::select(-known_relations)
+
+
+#-----------------------------------------------------------------------------------------------------------------------
+# more feature engineering - group composition
+#-----------------------------------------------------------------------------------------------------------------------
+
+titanic %>% 
+  dplyr::mutate(
+    group_size = purrr::map2_chr(companions, family_size, ~{
+      n <- length(unlist(.x))
+      if(n == 1 & .y == 1) {return("alone")}
+      if(pmax(n, .y) <= 4) {return("small")}
+      return("large")
+      } ),
+    group_type = purrr::map_chr(titanic$companions, ~{
+      sexes <- titanic$sex[titanic$PassengerId %in% .]
+      if(all(sexes == 0)){ return("all_male") }
+      if(all(sexes == 1)){ return("all_female") }
+      return("mixed")
+    }),
+    with_children = purrr::map_chr(titanic$companions, ~{
+      ages <- titanic$age_var[titanic$PassengerId %in% .]
+      if(any(ages < 16)){ return("with_children") }
+      return("all_adult")
+    }),
+    group = group_type
+    ) %>%
+  dplyr::group_by(group, class) %>% # class
+  dplyr::summarise(
+    .groups = "drop",
+    n_total = dplyr::n(),
+    
+    n_test = sum(is.na(survived)),
+    n_train = sum(!is.na(survived)),
+    
+    prop = sum(survived, na.rm = T) / n_train
+  ) %>%
+  dplyr::mutate(
+    p_test = round(n_test/ sum(n_test)*100, 2),
+    p_train = round(n_train / sum(n_train)*100, 2),
   ) %>%
   ggplot2::ggplot( ggplot2::aes(group, prop) ) +
   ggplot2::geom_col() +
-  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = n) )
+  ggplot2::geom_label( ggplot2::aes(y = 0.9, label = stringr::str_c("test: ",p_test, "%")) ) +
+  ggplot2::geom_label( ggplot2::aes(y = 0.8, label = stringr::str_c("train: ",p_train, "%")) ) +
+  ggplot2::facet_wrap(~class, nrow = 3)
 
 titanic <- titanic %>%
   dplyr::mutate(
-    prefix = extract_prefix(name, sex),
-    family_size = sib_sp + parch,
-     fare_bracket = purrr::map_chr(fare, function(fare) {
-      if(fare < 15) return("Fare_lowest")
-      if(fare < 50) return("Fare_low")
-      if(fare < 100) return("Fare_med")
-      if(fare < 200) return("Fare_high")
-      return("Fare_highest")
+    group_size = purrr::map2_int(companions, family_size, ~{
+      n <- length(unlist(.x))
+      if(n == 1 & .y == 1) {return(0L)} # alone
+      if(pmax(n, .y) <= 4) {return(1L)} # small
+      return(2L) # large
+    } ),
+    group_type = purrr::map_int(titanic$companions, ~{
+      sexes <- titanic$sex[titanic$PassengerId %in% .]
+      if(all(sexes == 0)){ return(0L) } # all male
+      if(all(sexes == 1)){ return(1L) } # all female
+      return(2L) # mixed
     }),
-    age_bracket = purrr::map_chr(age, function(age) {
-      if(age < 12) return("child")
-      if(age < 20) return("teenager")
-      if(age < 40) return("adult")
-      return("old")
+    with_children = purrr::map_int(titanic$companions, ~{
+      ages <- titanic$age_var[titanic$PassengerId %in% .]
+      if(any(ages < 16)){ return(1L) } # with children
+      return(0L) # not with children
     })
-  ) %>%
-  dplyr::select(PassengerId, survived, prefix, class, sex, age, fare, deck, embarked, family_size, fare_bracket, age_bracket, set)
+  )
 
 
 #-----------------------------------------------------------------------------------------------------------------------
-# possible feature engineering approaches:
+# make correlation matrix
 #-----------------------------------------------------------------------------------------------------------------------
 
-titanic %>%
-  dplyr::mutate(fare = round(titanic$fare) ) %>%
-  dplyr::arrange(fare) %>%
-  dplyr::group_by(fare) %>%
-  dplyr::summarise(
-    n = dplyr::n()
-  ) %>%
-  ggplot2::ggplot( ggplot2::aes( fare, n ) ) +
-  ggplot2::geom_col() +
-  ggplot2::scale_x_continuous(breaks = seq(0, 500, 25)) +
-  ggplot2::coord_cartesian(xlim = c(0, 50))
+Hmisc::rcorr(as.matrix( titanic[titanic$set == "train", !names(titanic) %in% c("PassengerId", "set", "name", "surname", "ticket_number", "age_var", "companions")] ))
 
-stringr::str_extract(titanic$ticket, "[0-9]+")
+# most not closely correlated 
+# - sex_class is closely linked to family size
+# - family size is very closely linked to cabin
 
-length(unique(titanic$ticket))
-
-# family size:
-# parch + sib_sp
-
-# age structure
-
-# adult female with dependents: sex = 1 & age >= 20 & parch > 0
-# adult male with dependants: sex = 0 & age >= 20 & parch > 0
-
-# titles from names
-
-
+# Ill leave them all in and see how it goes
 
 
 #-----------------------------------------------------------------------------------------------------------------------
 # read out:
 #-----------------------------------------------------------------------------------------------------------------------
-readr::write_csv(titanic, "titanic/titanic_clean.csv")
 
-# 0.8518518518518519
+titanic %>% 
+  dplyr::arrange(PassengerId) %>%
+  dplyr::select(PassengerId, survived, class, prefix, sex, age, sib_sp, parch, family_size, age_by_class, fare_by_class, group_size, group_type, with_children, set) %>%
+  readr::write_csv(., "titanic/titanic_clean.csv")
